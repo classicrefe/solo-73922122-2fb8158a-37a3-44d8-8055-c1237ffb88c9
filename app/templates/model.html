@@ -2,15 +2,23 @@
 {% block title %}型号 {{ model.name }} · 契约管理{% endblock %}
 {% block content %}
 <h1>型号 <span class="tag">{{ model.name }}</span></h1>
-<p class="muted">固件格式只追加；程序格式按程序号替换。发布即触发全量兼容检查（z3 证明，非抽样），失败不改动任何已发布格式。</p>
+<p class="muted">固件格式只追加；程序格式按程序号替换。发布即触发全量兼容检查（z3 证明，非抽样），失败不改动任何已发布格式。
+兼容结论按规范化契约内容寻址持久保存：未变化的内容直接复用，只有新增/替换一侧新产生的组合才重新求解，服务重启后仍然有效。</p>
 
 {% if result %}
   {% if result.ok %}
-  <div class="card notice-ok"><h3>✔ 发布成功</h3>{{ result.message }}</div>
+  <div class="card notice-ok"><h3>✔ 发布成功</h3>{{ result.message }}
+    <p class="muted">本次兼容检查共 {{ result.checked_pairs }} 个组合：
+      复用已有结论 {{ result.reused }} 个，重新求解 {{ result.recomputed }} 个。</p>
+  </div>
   {% else %}
   <div class="card notice-bad">
     <h3>✘ 发布被拒绝</h3>
     <p>{{ result.message }}</p>
+    {% if result.checked_pairs %}
+    <p class="muted">本次兼容检查共 {{ result.checked_pairs }} 个组合：
+      复用已有结论 {{ result.reused }} 个，重新求解 {{ result.recomputed }} 个。</p>
+    {% endif %}
     {% if result.problems %}
       <p><b>拒绝依据（不兼容组合与反例报文）：</b></p>
       {% for p in result.problems %}
@@ -90,7 +98,10 @@
     <td>{% if l.result == "published" %}<span style="color:var(--ok)">已发布</span>
         {% elif l.result == "rejected" %}<span style="color:var(--bad)">已拒绝</span>
         {% else %}<span class="err">无效</span>{% endif %}</td>
-    <td>{% if l.detail %}<pre>{{ l.detail | tojson }}</pre>{% endif %}</td>
+    <td>{% if l.detail %}{% if l.detail.reused is defined and l.detail.recomputed is defined %}
+        <div class="muted">复用 {{ l.detail.reused }} · 重算 {{ l.detail.recomputed }}
+          {% if l.detail.checked_pairs is defined %}（共 {{ l.detail.checked_pairs }} 个组合）{% endif %}</div>
+        {% endif %}<pre>{{ l.detail | tojson }}</pre>{% endif %}</td>
   </tr>
   {% else %}
   <tr><td colspan="4" class="muted">暂无日志。</td></tr>

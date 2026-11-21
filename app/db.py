@@ -1,7 +1,7 @@
 """持久化层：PostgreSQL（生产，docker-compose）/ SQLite（本地自测，由 DATABASE_URL 切换）。"""
 import os
 
-from sqlalchemy import (Column, DateTime, ForeignKey, Integer, String,
+from sqlalchemy import (Boolean, Column, DateTime, ForeignKey, Integer, String,
                         UniqueConstraint, create_engine, event, func)
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.types import JSON
@@ -66,3 +66,22 @@ class PublishLog(Base):
     result = Column(String(16), nullable=False)      # published | rejected | invalid
     detail = Column(JsonDoc, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class CompatibilityVerdict(Base):
+    """按规范化契约内容寻址的兼容结论缓存（固件写入格式 × 程序读取格式）。
+
+    firmware_hash / program_hash 是契约规范化内容的 SHA-256；同一对内容无论
+    出现在哪个型号、哪个版本、哪次发布，结论都可复用。
+    - compatible=true  => counterexample 为 NULL（全量证明通过）
+    - compatible=false => counterexample 为该组合的合法反例报文
+    只由发布事务写入并随事务一起提交/回滚；服务重启后仍可复用。
+    """
+    __tablename__ = "compatibility_verdicts"
+    id = Column(Integer, primary_key=True)
+    firmware_hash = Column(String(64), nullable=False, index=True)
+    program_hash = Column(String(64), nullable=False, index=True)
+    compatible = Column(Boolean, nullable=False)
+    counterexample = Column(JsonDoc, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (UniqueConstraint("firmware_hash", "program_hash"),)

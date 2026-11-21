@@ -8,12 +8,12 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 import service
-from db import (Base, DeviceModel, FirmwareFormat, ProgramFormat, PublishLog,
-                SessionLocal, engine)
+from db import (Base, CompatibilityVerdict, DeviceModel, FirmwareFormat,
+                ProgramFormat, PublishLog, SessionLocal, engine)
 from examples import EXAMPLES
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -87,7 +87,10 @@ def index(request: Request):
             fw = s.execute(select(FirmwareFormat).where(FirmwareFormat.model_id == m.id)).scalars().all()
             pg = s.execute(select(ProgramFormat).where(ProgramFormat.model_id == m.id)).scalars().all()
             rows.append({"name": m.name, "fw_count": len(fw), "pg_count": len(pg)})
-    return templates.TemplateResponse(request, "index.html", {"rows": rows})
+        cache_total = s.execute(
+            select(func.count(CompatibilityVerdict.id))).scalar_one()
+    return templates.TemplateResponse(request, "index.html",
+                                      {"rows": rows, "cache_total": cache_total})
 
 
 @app.post("/models")
@@ -97,8 +100,10 @@ def create_model(request: Request, name: str = Form(...)):
         with SessionLocal() as s:
             models = s.execute(select(DeviceModel).order_by(DeviceModel.name)).scalars().all()
             rows = [{"name": m.name, "fw_count": 0, "pg_count": 0} for m in models]
+            cache_total = s.execute(
+                select(func.count(CompatibilityVerdict.id))).scalar_one()
         return templates.TemplateResponse(
-            request, "index.html", {"rows": rows,
+            request, "index.html", {"rows": rows, "cache_total": cache_total,
                                     "error": "型号名只能由字母数字及 _ . - 组成，长度 1~64"},
             status_code=400)
     with SessionLocal() as s:
@@ -159,7 +164,9 @@ class ProgramIn(BaseModel):
 
 
 def _outcome_response(outcome: service.PublishOutcome, extra=None):
-    body = {"ok": outcome.ok, "message": outcome.message}
+    body = {"ok": outcome.ok, "message": outcome.message,
+            "checked_pairs": outcome.checked_pairs,
+            "reused": outcome.reused, "recomputed": outcome.recomputed}
     if outcome.problems:
         body["problems"] = outcome.problems
     if extra:
@@ -208,6 +215,18 @@ def api_model_log(name: str):
     return {"logs": [{"action": l.action, "program_id": l.program_id,
                       "result": l.result, "detail": l.detail,
                       "created_at": str(l.created_at)} for l in ctx["logs"]]}
+
+
+@app.get("/api/cache/stats")
+def api_cache_stats():
+    """已持久化的兼容结论数量（按规范化契约内容寻址，跨型号、跨重启复用）。"""
+    with SessionLocal() as s:
+        total = s.execute(select(func.count(CompatibilityVerdict.id))).scalar_one()
+        compatible = s.execute(
+            select(func.count(CompatibilityVerdict.id))
+            .where(CompatibilityVerdict.compatible.is_(True))).scalar_one()
+    return {"verdicts": total, "compatible": compatible,
+            "incompatible": total - compatible}
 
 
 @app.post("/api/models/{name}/firmware")

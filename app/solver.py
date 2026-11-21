@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from z3 import And, Bool, Implies, Int, Not, Or, Solver, is_true, sat
 
-from schema_spec import Schema, message_valid
+from schema_spec import Schema, canonical_hash, message_valid
 
 KIND_NULL, KIND_INT, KIND_STR = 0, 1, 2
 SOLVER_TIMEOUT_MS = 15000
@@ -141,3 +141,64 @@ def check_compatibility(fw_pairs, prog_pairs):
                     "counterexample": cex,
                 })
     return problems
+
+
+class VerdictCache:
+    """一次发布事务内的兼容结论缓存。
+
+    以「固件规范化哈希 × 程序规范化哈希」为键。fw_pairs / prog_pairs 是本次
+    发布将要生效的全部组合（版本号、程序号在调用前已确定）。已有结论直接复用，
+    未命中的组合才调用 find_counterexample 求解，新结论记录在内存中，由调用方
+    随发布事务一起落库。
+    """
+
+    def __init__(self, fw_pairs, prog_pairs, loader):
+        self.fw_pairs = fw_pairs
+        self.prog_pairs = prog_pairs
+        self.reused = 0
+        self.recomputed = 0
+        self._fw_hashes = [canonical_hash(s) for _, s in fw_pairs]
+        self._prog_hashes = [canonical_hash(s) for _, s in prog_pairs]
+        self._verdicts = loader(self._fw_hashes, self._prog_hashes)
+        self._new_verdicts = {}
+
+    def check(self):
+        problems = []
+        for i, (fv, fw) in enumerate(self.fw_pairs):
+            for j, (pid, prog) in enumerate(self.prog_pairs):
+                key = (self._fw_hashes[i], self._prog_hashes[j])
+                if key in self._new_verdicts:
+                    verdict = self._new_verdicts[key]
+                    self.reused += 1
+                elif key in self._verdicts:
+                    verdict = self._verdicts[key]
+                    # 防御：缓存的反例必须仍能复核通过，否则当作未命中重算
+                    if verdict is not None and not (
+                            message_valid(verdict, fw) and not message_valid(verdict, prog)):
+                        del self._verdicts[key]
+                        verdict = self._solve_and_remember(key, fw, prog)
+                    else:
+                        self.reused += 1
+                else:
+                    verdict = self._solve_and_remember(key, fw, prog)
+                if verdict is not None:
+                    problems.append({
+                        "firmware_version": fv,
+                        "program_id": pid,
+                        "counterexample": verdict,
+                    })
+        return problems
+
+    def _solve_and_remember(self, key, fw, prog):
+        cex = find_counterexample(fw, prog)
+        self._new_verdicts[key] = cex
+        self.recomputed += 1
+        return cex
+
+    def new_verdicts(self):
+        """本次新求得、需要随事务落库的结论：[(fw_hash, prog_hash, cex)]。
+
+        按哈希排序，保证并发事务以相同顺序获取唯一索引锁。
+        """
+        return sorted(((fh, ph, cex) for (fh, ph), cex in self._new_verdicts.items()),
+                      key=lambda item: (item[0], item[1]))

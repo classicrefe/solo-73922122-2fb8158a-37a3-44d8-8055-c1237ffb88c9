@@ -9,8 +9,14 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Optional
+
+# 规范化算法的版本号：算法一旦调整，哈希即随之变化，旧缓存结论自动失效，
+# 不会被误当作新语义的结论复用。
+CANON_VERSION = 1
 
 MAX_BRANCHES = 16
 MAX_PROPERTIES = 64
@@ -179,6 +185,50 @@ def message_valid(msg, schema: Schema) -> bool:
     return any(_branch_valid(msg, b) for b in schema.branches)
 
 
+# ---------- 规范化契约内容（缓存键） ----------
+#
+# 两个文档只要语义相同（属性顺序、required 顺序、枚举顺序、anyOf 分支顺序
+# 不同，或 anyOf 分支重复），规范化后必须完全一致；语义不同则不能相同。
+# 因此规范化只依据解析后的 Schema，不直接对原始 JSON 排序。
+
+def canonical_form(schema: Schema) -> dict:
+    branches = []
+    for b in schema.branches:
+        props = {}
+        for name in sorted(b.properties):
+            spec = b.properties[name]
+            item = {"allow_null": spec.allow_null, "int_kind": spec.int_kind}
+            if spec.int_kind == "range":
+                item["int_lo"] = spec.int_lo
+                item["int_hi"] = spec.int_hi
+            elif spec.int_kind == "set":
+                item["int_set"] = sorted(spec.int_set)
+            if spec.str_set is not None:
+                item["str_set"] = sorted(spec.str_set)
+            props[name] = item
+        branches.append({"properties": props, "required": sorted(b.required)})
+    # anyOf 各分支是析取关系：排序并去重不改变语义
+    branches.sort(key=lambda x: json.dumps(x, sort_keys=True, ensure_ascii=False,
+                                           separators=(",", ":")))
+    deduped = []
+    for b in branches:
+        if not deduped or deduped[-1] != b:
+            deduped.append(b)
+    return {"branches": deduped}
+
+
+def canonical_json(schema: Schema) -> str:
+    return json.dumps(canonical_form(schema), sort_keys=True, ensure_ascii=False,
+                      separators=(",", ":"))
+
+
+def canonical_hash(schema: Schema) -> str:
+    """规范化契约内容的 SHA-256（十六进制），用作可复用兼容结论的寻址键。
+
+    前缀写入 CANON_VERSION，规范化算法调整时旧结论自然失效。
+    """
+    payload = f"v{CANON_VERSION}\n" + canonical_json(schema)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 def _branch_valid(msg: dict, b: Branch) -> bool:
     for k in msg:
         if k not in b.properties:  # additionalProperties: false
